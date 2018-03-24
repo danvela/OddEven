@@ -1,0 +1,274 @@
+
+Description: TestECS
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: TestVPC
+  TestVPC:
+    Type: String
+  ClusterName:
+    Type: String
+    Default: OddEven
+  LogGroupName:
+    Type: String
+    Default: Test-ECS
+Resources:
+  SecurityGroupEC2:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allows access to instances by group membership
+      VpcId: !ImportValue TestVPC-VPC
+      Tags:
+        - Key: Name
+          Value: security-group-ec2
+  SecurityGroupIP:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allows access to instances by CidrIp
+      VpcId: !ImportValue TestVPC-VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      Tags:
+        - Key: Name
+          Value: security-group-ip
+  SecurityGroupEC2Ingress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroupEC2
+      SourceSecurityGroupId: !Ref SecurityGroupEC2
+      IpProtocol: -1
+  LogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 5
+  InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+  PolicyEc2:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Sub 'policy-${AWS::StackName}-ec2'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:DescribeInstances'
+              - 'cloudwatch:PutMetricData'
+              - 'cloudwatch:GetMetricStatistics'
+              - 'cloudwatch:ListMetrics'
+              - 'ec2:DescribeTags'
+            Resource:
+              - '*'
+      Roles:
+        - !Ref InstanceRole
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+      InstanceProfileName: !Sub '${AWS::StackName}'
+  TaskRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole'
+  PolicyLogs:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Sub 'policy-${AWS::StackName}-logs'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogStreams'
+            Resource:
+            - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}*"
+      Roles:
+        - !Ref TaskRole
+  OddTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: odd
+          Image: danvela/odd
+          Memory: 256
+          EntryPoint:
+            - /opt/scripts/odd.sh
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              'awslogs-region': !Ref 'AWS::Region'
+              'awslogs-group': !Ref LogGroupName
+              'awslogs-stream-prefix': 'odd'
+
+  EvenTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: even
+          Image: danvela/even
+          Memory: 256
+          EntryPoint:
+            - /opt/scripts/even.sh
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              'awslogs-region': !Ref 'AWS::Region'
+              'awslogs-group': !Ref LogGroupName
+              'awslogs-stream-prefix': 'even'
+
+  ServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole'
+
+  OddService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      ServiceName: odd_service
+      Cluster: !Ref ClusterName
+      DesiredCount: 1
+      TaskDefinition: !Ref OddTaskDefinition
+      PlacementConstraints: 
+      - Type: memberOf
+        Expression: attribute:ecs.availability-zone in [us-east-2a]
+
+  EvenService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      ServiceName: even_service
+      Cluster: !Ref ClusterName
+      DesiredCount: 1
+      TaskDefinition: !Ref EvenTaskDefinition
+      PlacementConstraints: 
+      - Type: memberOf
+        Expression: not(attribute:ecs.availability-zone == us-east-2a)
+
+  IAMInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - Ref: TaskRole
+  Cluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Ref ClusterName
+  AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier:
+        - 'Fn::ImportValue': !Sub TestVPC-PublicSubnet1
+        - 'Fn::ImportValue': !Sub TestVPC-PublicSubnet2
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      Tags:
+        - Key: Name
+          Value: oddeven_ecs_hosts
+          PropagateAtLaunch: true
+        - Key: ECS_Cluster
+          Value: !Ref ClusterName
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '2'
+        MaxBatchSize: '2'
+  LaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    DeletionPolicy: Retain
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          default:
+            - setup
+        setup:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackName}
+                region=${AWS::Region}
+            /tmp/awslogs.conf:
+              content: !Sub |
+                [general]
+                state_file = /var/lib/awslogs/agent-state
+
+                [/var/log/oddevenlogs]
+                file = /var/log/oddevenlogs
+                log_group_name = oddevenlogs
+                log_stream_name = oddevenlogs-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+          commands:
+            01_configure:
+              command: !Sub |
+                #!/bin/bash -xe
+                echo "ECS_CLUSTER=${ClusterName}" >> /etc/ecs/ecs.config
+                yum update -y
+                yum install awslogs -y
+                service awslogs restart
+                chkconfig awslogs on
+    Properties:
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: test-kp
+      ImageId: ami-1b90a67e
+      SecurityGroups:
+        - !Ref SecurityGroupEC2
+        - !Ref SecurityGroupIP
+      UserData:
+        'Fn::Base64': !Sub >
+          #!/bin/bash
+
+          yum install -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource
+          LaunchConfiguration --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? --resource LaunchConfiguration --stack
+          ${AWS::StackName}
